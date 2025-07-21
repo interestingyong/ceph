@@ -2677,7 +2677,7 @@ bool RadosObject::is_sync_completed(const DoutPrefixProvider* dpp,
 
 int RadosObject::list_parts(const DoutPrefixProvider* dpp, CephContext* cct,
 			   int max_parts, int marker, int* next_marker,
-			   bool* truncated, list_parts_each_t each_func,
+			   bool* truncated, list_parts_each_t&& each_func,
 			   optional_yield y)
 {
   int ret{0};
@@ -2782,6 +2782,9 @@ int RadosObject::load_obj_state(const DoutPrefixProvider* dpp, optional_yield y,
 
   int ret = store->getRados()->get_obj_state(dpp, rados_ctx, bucket->get_info(), get_obj(), &pstate, &manifest, follow_olh, y);
   if (ret < 0) {
+    if (ret == -ENOENT) {
+      state.is_dm = pstate->is_dm;
+    }
     return ret;
   }
 
@@ -3138,7 +3141,7 @@ int RadosObject::restore_obj_from_cloud(Bucket* bucket,
     return ret;
   }
 
-  ldpp_dout(dpp, 20) << "Sucessfully restored object(" << get_key() << ") from the cloud endpoint(" << endpoint << ")" << dendl;
+  ldpp_dout(dpp, 20) << "Successfully restored object(" << get_key() << ") from the cloud endpoint(" << endpoint << ")" << dendl;
 
   return ret;
 }

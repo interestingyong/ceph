@@ -872,6 +872,7 @@ class ServiceSpec(object):
                  extra_container_args: Optional[GeneralArgList] = None,
                  extra_entrypoint_args: Optional[GeneralArgList] = None,
                  custom_configs: Optional[List[CustomConfig]] = None,
+                 ip_addrs: Optional[Dict[str, str]] = None,
                  ):
 
         #: See :ref:`orchestrator-cli-placement-spec`.
@@ -920,6 +921,10 @@ class ServiceSpec(object):
             self.extra_entrypoint_args = ArgumentSpec.from_general_args(
                 extra_entrypoint_args)
         self.custom_configs: Optional[List[CustomConfig]] = custom_configs
+
+        # ip_addrs is a dict where each key is a hostname and the corresponding value
+        # is the IP address {hostname: ip} that the NFS service should bind to on that host.
+        self.ip_addrs = ip_addrs
 
     def __setattr__(self, name: str, value: Any) -> None:
         if value is not None and name in ('extra_container_args', 'extra_entrypoint_args'):
@@ -1140,7 +1145,10 @@ class NFSServiceSpec(ServiceSpec):
                  preview_only: bool = False,
                  config: Optional[Dict[str, str]] = None,
                  networks: Optional[List[str]] = None,
+                 ip_addrs: Optional[Dict[str, str]] = None,
                  port: Optional[int] = None,
+                 monitoring_networks: Optional[List[str]] = None,
+                 monitoring_ip_addrs: Optional[Dict[str, str]] = None,
                  monitoring_port: Optional[int] = None,
                  virtual_ip: Optional[str] = None,
                  enable_nlm: bool = False,
@@ -1155,10 +1163,19 @@ class NFSServiceSpec(ServiceSpec):
             'nfs', service_id=service_id,
             placement=placement, unmanaged=unmanaged, preview_only=preview_only,
             config=config, networks=networks, extra_container_args=extra_container_args,
-            extra_entrypoint_args=extra_entrypoint_args, custom_configs=custom_configs)
+            extra_entrypoint_args=extra_entrypoint_args, custom_configs=custom_configs,
+            ip_addrs=ip_addrs)
 
         self.port = port
+
+        # monitoring_ip_addrs is a dictionary where each key is a hostname and the corresponding
+        # value is the IP address {hostname: ip} that the monitor should bind to on that host.
+        # monitoring_networks is a list of networks where the monitor is allowed to bind.
+        # user can pass one parameter to bind monitor on specific IP.
+        self.monitoring_ip_addrs = monitoring_ip_addrs
+        self.monitoring_networks = monitoring_networks
         self.monitoring_port = monitoring_port
+
         self.virtual_ip = virtual_ip
         self.enable_haproxy_protocol = enable_haproxy_protocol
         self.idmap_conf = idmap_conf
@@ -1172,6 +1189,13 @@ class NFSServiceSpec(ServiceSpec):
     def rados_config_name(self):
         # type: () -> str
         return 'conf-' + self.service_name()
+
+    def validate(self) -> None:
+        super(NFSServiceSpec, self).validate()
+
+        if self.virtual_ip and (self.ip_addrs or self.networks):
+            raise SpecValidationError("Invalid NFS spec: Cannot set virtual_ip and "
+                                      f"{'ip_addrs' if self.ip_addrs else 'networks'} fields")
 
 
 yaml.add_representer(NFSServiceSpec, ServiceSpec.yaml_representer)
@@ -1394,6 +1418,8 @@ class NvmeofServiceSpec(ServiceSpec):
                  enable_prometheus_exporter: Optional[bool] = True,
                  prometheus_port: Optional[int] = 10008,
                  prometheus_stats_interval: Optional[int] = 10,
+                 prometheus_startup_delay: Optional[int] = 240,
+                 prometheus_connection_list_cache_expiration: Optional[int] = 60,
                  bdevs_per_cluster: Optional[int] = None,
                  flat_bdevs_per_cluster: Optional[int] = None,
                  cluster_connections: Optional[int] = None,
@@ -1407,10 +1433,11 @@ class NvmeofServiceSpec(ServiceSpec):
                  max_namespaces_with_netmask: Optional[int] = 1000,
                  max_subsystems: Optional[int] = 128,
                  max_hosts: Optional[int] = 2048,
-                 max_namespaces: Optional[int] = 2048,
-                 max_namespaces_per_subsystem: Optional[int] = 256,
+                 max_namespaces: Optional[int] = 4096,
+                 max_namespaces_per_subsystem: Optional[int] = 512,
                  max_hosts_per_subsystem: Optional[int] = 128,
                  subsystem_cache_expiration: Optional[int] = 5,
+                 force_tls: Optional[bool] = False,
                  server_key: Optional[str] = None,
                  server_cert: Optional[str] = None,
                  client_key: Optional[str] = None,
@@ -1504,6 +1531,11 @@ class NvmeofServiceSpec(ServiceSpec):
         self.prometheus_port = prometheus_port or 10008
         #: ``prometheus_stats_interval`` Prometheus get stats interval
         self.prometheus_stats_interval = prometheus_stats_interval
+        #: ``prometheus_startup_delay`` Prometheus startup delay, in seconds
+        self.prometheus_startup_delay = prometheus_startup_delay
+        #: ``prometheus_connection_list_cache_expiration`` Expiration time of connection list cache
+        self.prometheus_connection_list_cache_expiration = \
+            prometheus_connection_list_cache_expiration
         #: ``verify_nqns`` enables verification of subsystem and host NQNs for validity
         self.verify_nqns = verify_nqns
         #: ``verify_keys`` enables verification of PSJ and DHCHAP keys in the gateway
@@ -1540,6 +1572,8 @@ class NvmeofServiceSpec(ServiceSpec):
         self.max_hosts_per_subsystem = max_hosts_per_subsystem
         #: ``subsystem_cache_expiration`` number of seconds before subsystems cache expires
         self.subsystem_cache_expiration = subsystem_cache_expiration
+        #: ``force_tls`` force using TLS when adding hosts and listeners
+        self.force_tls = force_tls
         #: ``allowed_consecutive_spdk_ping_failures`` # of ping failures before aborting gateway
         self.allowed_consecutive_spdk_ping_failures = allowed_consecutive_spdk_ping_failures
         #: ``spdk_ping_interval_in_seconds`` sleep interval in seconds between SPDK pings
@@ -1744,6 +1778,7 @@ class NvmeofServiceSpec(ServiceSpec):
         verify_positive_int(self.max_hosts_per_subsystem, "Max hosts per subsystem")
         verify_non_negative_number(self.subsystem_cache_expiration,
                                    "Subsystem cache expiration period")
+        verify_boolean(self.force_tls, "Force TLS")
         verify_non_negative_number(self.monitor_timeout, "Monitor timeout")
         verify_non_negative_int(self.port, "Port")
         verify_non_negative_int(self.discovery_port, "Discovery port")
@@ -2492,14 +2527,14 @@ class AlertManagerSpec(MonitoringSpec):
         # service_type: alertmanager
         # service_id: xyz
         # user_data:
-        #   default_webhook_urls:
+        #   webhook_urls:
         #   - "https://foo"
         #   - "https://bar"
         #
         # Documentation:
-        # default_webhook_urls - A list of additional URL's that are
-        #                        added to the default receivers'
-        #                        <webhook_configs> configuration.
+        # webhook_urls - A list of additional URL's that are
+        #                added to the default receivers'
+        #                <webhook_configs> configuration.
         self.user_data = user_data or {}
         self.secure = secure
         self.only_bind_port_on_networks = only_bind_port_on_networks

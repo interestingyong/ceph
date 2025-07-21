@@ -1183,6 +1183,74 @@ class RgwClient(RestClient):
             raise DashboardException(msg=str(e), component='rgw')
         return result
 
+    @RestClient.api_put('/{bucket_name}?notification')
+    def set_notification(self, bucket_name, notification, request=None):
+        # pylint: disable=unused-argument
+
+        notification = notification.strip()
+
+        if notification.startswith('{'):
+            notification = self.dict_to_xml(notification)
+
+        if not notification.startswith('<NotificationConfiguration'):
+            notification = (
+                f'<NotificationConfiguration>{notification}</NotificationConfiguration>'
+            )
+
+        try:
+            result = request(data=notification)  # type: ignore
+        except RequestException as e:
+            raise DashboardException(msg=str(e), component='rgw')
+
+        return result
+
+    @RestClient.api_get('/{bucket_name}?notification')
+    def get_notification(self, bucket_name, request=None):
+        # pylint: disable=unused-argument
+        try:
+            result = request(
+                raw_content=True,
+                headers={'Accept': 'text/xml'}
+            ).decode()  # type: ignore
+        except RequestException as e:
+            raise DashboardException(msg=str(e), component='rgw')
+
+        notification_config_dict = xmltodict.parse(result)
+        notification_configuration = notification_config_dict.get(
+            'NotificationConfiguration'
+        ) or {}
+        topic_configuration = notification_configuration.get('TopicConfiguration')
+        if not topic_configuration:
+            return []
+
+        if isinstance(topic_configuration, dict):
+            topic_configuration = [topic_configuration]
+
+        def normalize_filter_rules(filter_dict):
+            if not isinstance(filter_dict, dict):
+                return
+            for key in ['S3Key', 'S3Metadata', 'S3Tags']:
+                if key in filter_dict:
+                    rules = filter_dict[key].get('FilterRule')
+                    if rules and isinstance(rules, dict):
+                        filter_dict[key]['FilterRule'] = [rules]
+
+        for topic in topic_configuration:
+            topic_filter = topic.get('Filter')
+            if topic_filter:
+                normalize_filter_rules(topic_filter)
+
+        return notification_configuration
+
+    @RestClient.api_delete('/{bucket_name}?notification={notification_id}')
+    def delete_notification(self, bucket_name, notification_id, request=None):
+        # pylint: disable=unused-argument
+        try:
+            result = request()
+        except RequestException as e:
+            raise DashboardException(msg=str(e), component='rgw')
+        return result
+
 
 class SyncStatus(Enum):
     enabled = 'enabled'
@@ -2033,7 +2101,7 @@ class RgwMultisite:
     def add_placement_targets(self, zonegroup_name: str, placement_targets: List[Dict]):
         rgw_add_placement_cmd = ['zonegroup', 'placement', 'add']
         STANDARD_STORAGE_CLASS = "STANDARD"
-        CLOUD_S3_TIER_TYPE = "cloud-s3"
+        CLOUD_S3_TIER_TYPES = ["cloud-s3", "cloud-s3-glacier"]
 
         for placement_target in placement_targets:  # pylint: disable=R1702
             cmd_add_placement_options = [
@@ -2043,16 +2111,14 @@ class RgwMultisite:
             storage_class_name = placement_target.get('storage_class', None)
             tier_type = placement_target.get('tier_type', None)
 
-            if (
-                placement_target.get('tier_type') == CLOUD_S3_TIER_TYPE
-                and storage_class_name != STANDARD_STORAGE_CLASS
-            ):
+            if tier_type in CLOUD_S3_TIER_TYPES and storage_class_name != STANDARD_STORAGE_CLASS:
                 tier_config = placement_target.get('tier_config', {})
                 if tier_config:
                     tier_config_items = self.modify_retain_head(tier_config)
                     tier_config_str = ','.join(tier_config_items)
                     cmd_add_placement_options += [
-                        '--tier-type', 'cloud-s3', '--tier-config', tier_config_str
+                        '--tier-type', tier_type,
+                        '--tier-config', tier_config_str
                     ]
 
             if placement_target.get('tags') and storage_class_name != STANDARD_STORAGE_CLASS:
@@ -2079,7 +2145,7 @@ class RgwMultisite:
                         )
                 except SubprocessError as error:
                     raise DashboardException(error, http_status_code=500, component='rgw')
-                if tier_type == CLOUD_S3_TIER_TYPE:
+                if tier_type in CLOUD_S3_TIER_TYPES:
                     self.ensure_realm_and_sync_period()
 
             if storage_classes:
@@ -2103,13 +2169,13 @@ class RgwMultisite:
                                 )
                         except SubprocessError as error:
                             raise DashboardException(error, http_status_code=500, component='rgw')
-                        if tier_type == CLOUD_S3_TIER_TYPE:
+                        if tier_type in CLOUD_S3_TIER_TYPES:
                             self.ensure_realm_and_sync_period()
 
     def modify_placement_targets(self, zonegroup_name: str, placement_targets: List[Dict]):
         rgw_add_placement_cmd = ['zonegroup', 'placement', 'modify']
         STANDARD_STORAGE_CLASS = "STANDARD"
-        CLOUD_S3_TIER_TYPE = "cloud-s3"
+        CLOUD_S3_TIER_TYPES = ["cloud-s3", "cloud-s3-glacier"]
 
         for placement_target in placement_targets:  # pylint: disable=R1702,line-too-long # noqa: E501
             cmd_add_placement_options = [
@@ -2117,9 +2183,10 @@ class RgwMultisite:
                 '--placement-id', placement_target['placement_id']
             ]
             storage_class_name = placement_target.get('storage_class', None)
+            tier_type = placement_target.get('tier_type')
 
             if (
-                placement_target.get('tier_type') == CLOUD_S3_TIER_TYPE
+                placement_target.get('tier_type') == CLOUD_S3_TIER_TYPES
                 and storage_class_name != STANDARD_STORAGE_CLASS
             ):
                 tier_config = placement_target.get('tier_config', {})
@@ -2154,7 +2221,8 @@ class RgwMultisite:
                         )
                 except SubprocessError as error:
                     raise DashboardException(error, http_status_code=500, component='rgw')
-                self.ensure_realm_and_sync_period()
+                if tier_type in CLOUD_S3_TIER_TYPES:
+                    self.ensure_realm_and_sync_period()
 
             if storage_classes:
                 for sc in storage_classes:
@@ -2177,7 +2245,8 @@ class RgwMultisite:
                                 )
                         except SubprocessError as error:
                             raise DashboardException(error, http_status_code=500, component='rgw')
-                        self.ensure_realm_and_sync_period()
+                        if tier_type in CLOUD_S3_TIER_TYPES:
+                            self.ensure_realm_and_sync_period()
 
     def delete_placement_targets(self, placement_id: str, storage_class: str):
         rgw_zonegroup_delete_cmd = ['zonegroup', 'placement', 'rm',

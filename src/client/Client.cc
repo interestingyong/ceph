@@ -6204,22 +6204,23 @@ int Client::may_setattr(const InodeRef& in, struct ceph_statx *stx, int mask,
   }
 
   if (mask & CEPH_SETATTR_MODE) {
-    bool allowed = false;
     /*
      * Currently the kernel fuse and libfuse code is buggy and
      * won't pass the ATTR_KILL_SUID/ATTR_KILL_SGID to ceph-fuse.
      * But will just set the ATTR_MODE and at the same time by
      * clearing the suid/sgid bits.
      *
-     * Only allow unprivileged users to clear S_ISUID and S_ISUID.
+     * Only allow unprivileged users to clear S_ISUID and S_ISGID.
      */
-    if ((in->mode & (S_ISUID | S_ISGID)) != (stx->stx_mode & (S_ISUID | S_ISGID)) &&
-        (in->mode & ~(S_ISUID | S_ISGID)) == (stx->stx_mode & ~(S_ISUID | S_ISGID))) {
-      allowed = true;
-    }
-    uint32_t m = ~stx->stx_mode & in->mode; // mode bits removed
-    ldout(cct, 20) << __func__ << " " << *in << " = " << hex << m << dec <<  dendl;
-    if (perms.uid() != 0 && perms.uid() != in->uid && !allowed)
+    uint32_t removed_bits = ~stx->stx_mode & in->mode;
+    uint32_t added_bits = ~in->mode & stx->stx_mode;
+    bool clearing_suid_sgid = (
+      // no new bits added
+      added_bits == 0 &&
+      // only suid/suid bits removed
+      (removed_bits & ~(S_ISUID | S_ISGID)) == 0);
+    ldout(cct, 20) << __func__ << " " << *in << " = " << hex << removed_bits << dec <<  dendl;
+    if (perms.uid() != 0 && perms.uid() != in->uid && !clearing_suid_sgid)
       goto out;
 
     gid_t i_gid = (mask & CEPH_SETATTR_GID) ? stx->stx_gid : in->gid;
@@ -11474,7 +11475,9 @@ int Client::write(int fd, const char *buf, loff_t size, loff_t offset)
 #endif
   /* We can't return bytes written larger than INT_MAX, clamp size to that */
   size = std::min(size, (loff_t)INT_MAX);
-  int r = _write(fh, offset, size, buf, NULL, false);
+  bufferlist bl;
+  bl.append(buf, size);
+  int r = _write(fh, offset, size, std::move(bl));
   ldout(cct, 3) << "write(" << fd << ", \"...\", " << size << ", " << offset << ") = " << r << dendl;
   return r;
 }
@@ -11499,7 +11502,7 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
     if(iovcnt < 0) {
       return -EINVAL;
     }
-    loff_t totallen = 0;
+    size_t totallen = 0;
     for (int i = 0; i < iovcnt; i++) {
         totallen += iov[i].iov_len;
     }
@@ -11509,12 +11512,29 @@ int64_t Client::_preadv_pwritev_locked(Fh *fh, const struct iovec *iov,
      * 32-bit signed integers. Clamp the I/O sizes in those functions so that
      * we don't do I/Os larger than the values we can return.
      */
+    bufferlist data;
     if (clamp_to_int) {
-      totallen = std::min(totallen, (loff_t)INT_MAX);
+      totallen = std::min(totallen, (size_t)INT_MAX);
+      size_t total_appended = 0;
+      for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_len > 0) {
+          if (total_appended + iov[i].iov_len >= totallen) {
+            data.append((const char *)iov[i].iov_base, totallen - total_appended);
+            break;
+          } else {
+            data.append((const char *)iov[i].iov_base, iov[i].iov_len);
+            total_appended += iov[i].iov_len;
+          }
+        }
+      }
+    } else {
+      for (int i = 0; i < iovcnt; i++) {
+        data.append((const char *)iov[i].iov_base, iov[i].iov_len);
+      }
     }
 
     if (write) {
-        int64_t w = _write(fh, offset, totallen, NULL, iov, iovcnt, onfinish, do_fsync, syncdataonly);
+        int64_t w = _write(fh, offset, totallen, std::move(data), onfinish, do_fsync, syncdataonly);
         ldout(cct, 3) << "pwritev(" << fh << ", \"...\", " << totallen << ", " << offset << ") = " << w << dendl;
         return w;
     } else {
@@ -11698,9 +11718,8 @@ bool Client::C_Write_Finisher::try_complete()
   return false;
 }
 
-int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
-	                const struct iovec *iov, int iovcnt, Context *onfinish,
-	                bool do_fsync, bool syncdataonly)
+int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, bufferlist bl,
+	               Context *onfinish, bool do_fsync, bool syncdataonly)
 {
   ceph_assert(ceph_mutex_is_locked_by_me(client_lock));
 
@@ -11768,19 +11787,6 @@ int64_t Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf,
     if (r < 0)
       return r;
     ceph_assert(in->inline_version > 0);
-  }
-
-  // copy into fresh buffer (since our write may be resub, async)
-  bufferlist bl;
-  if (buf) {
-    if (size > 0)
-      bl.append(buf, size);
-  } else if (iov){
-    for (int i = 0; i < iovcnt; i++) {
-      if (iov[i].iov_len > 0) {
-        bl.append((const char *)iov[i].iov_base, iov[i].iov_len);
-      }
-    }
   }
 
   int want, have;
@@ -16149,7 +16155,9 @@ int Client::ll_write(Fh *fh, loff_t off, loff_t len, const char *data)
   tout(cct) << off << std::endl;
   tout(cct) << len << std::endl;
 
-  int r = _write(fh, off, len, data, NULL, 0);
+  bufferlist bl;
+  bl.append(data, len);
+  int r = _write(fh, off, len, std::move(bl));
   ldout(cct, 3) << "ll_write " << fh << " " << off << "~" << len << " = " << r
 		<< dendl;
   return r;
@@ -16167,7 +16175,7 @@ int64_t Client::ll_writev(struct Fh *fh, const struct iovec *iov, int iovcnt, in
     ldout(cct, 3) << "(fh)" << fh << " is invalid" << dendl;
     return -EBADF;
   }
-  return _preadv_pwritev_locked(fh, iov, iovcnt, off, true, false);
+  return _preadv_pwritev_locked(fh, iov, iovcnt, off, true, true);
 }
 
 int64_t Client::ll_readv(struct Fh *fh, const struct iovec *iov, int iovcnt, int64_t off)
@@ -16182,7 +16190,7 @@ int64_t Client::ll_readv(struct Fh *fh, const struct iovec *iov, int iovcnt, int
     ldout(cct, 3) << "(fh)" << fh << " is invalid" << dendl;
     return -EBADF;
   }
-  return _preadv_pwritev_locked(fh, iov, iovcnt, off, false, false);
+  return _preadv_pwritev_locked(fh, iov, iovcnt, off, false, true);
 }
 
 int64_t Client::ll_preadv_pwritev(struct Fh *fh, const struct iovec *iov,
