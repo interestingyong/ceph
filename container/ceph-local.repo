@@ -1,0 +1,6 @@
+[local-ceph]
+name=Local Ceph Repo
+baseurl=file:///local-rpms  # Docker 容器内路径
+enabled=1
+gpgcheck=0
+priority=1

@@ -22,6 +22,12 @@ ARG OSD_FLAVOR="default"
 # (optional) Should be 'true' for CI builds (pull from shaman, etc.)
 ARG CI_CONTAINER="true"
 
+## keep debug rpms, could drop later in future.
+ARG LOCAL_RPM_DIR="localrpms"
+RUN mkdir -p /local-rpms
+COPY ${LOCAL_RPM_DIR} /local-rpms
+COPY ceph-local.repo /etc/yum.repos.d/
+
 
 RUN /bin/echo -e "\
 FROM_IMAGE: ${FROM_IMAGE}\n\
@@ -84,24 +90,29 @@ RUN set -ex && \
     esac
 
 # Ceph repo
-RUN --mount=type=secret,id=prerelease_creds set -ex && \
-    rpm --import 'https://download.ceph.com/keys/release.asc' && \
-    ARCH=$(arch); if [ "${ARCH}" == "aarch64" ]; then ARCH="arm64"; fi ;\
-    IS_RELEASE=0 ;\
-    if [[ "${CI_CONTAINER}" == "true" ]] ; then \
-        # TODO: this can return different ceph builds (SHA1) for x86 vs. arm runs. is it important to fix?
-        REPO_URL=$(curl -fs "https://shaman.ceph.com/api/search/?project=ceph&distros=centos/9/${ARCH}&flavor=${OSD_FLAVOR}&ref=${CEPH_REF}&sha1=latest" | jq -r .[0].url) ;\
-    else \
-        IS_RELEASE=1 ;\
-        source /run/secrets/prerelease_creds; \
-        REPO_URL="https://${PRERELEASE_USERNAME}:${PRERELEASE_PASSWORD}@download.ceph.com/prerelease/ceph/rpm-${CEPH_REF}/el9/" ;\
-    fi && \
-    rpm -Uvh "$REPO_URL/noarch/ceph-release-1-${IS_RELEASE}.el9.noarch.rpm" ; \
-    if [[ "$IS_RELEASE" == 1 ]] ; then \
-        sed -i "s;http://download.ceph.com/;https://${PRERELEASE_USERNAME}:${PRERELEASE_PASSWORD}@download.ceph.com/prerelease/ceph/;" /etc/yum.repos.d/ceph.repo ; \
-        dnf clean expire-cache ; \
-    fi
 
+#RUN --mount=type=secret,id=prerelease_creds set -ex && \
+#    rpm --import 'https://download.ceph.com/keys/release.asc' && \
+#    ARCH=$(arch); if [ "${ARCH}" == "aarch64" ]; then ARCH="arm64"; fi ;\
+#    IS_RELEASE=0 ;\
+#    if [[ "${CI_CONTAINER}" == "true" ]] ; then \
+#        # TODO: this can return different ceph builds (SHA1) for x86 vs. arm runs. is it important to fix?
+#        REPO_URL=$(curl -fs "https://shaman.ceph.com/api/search/?project=ceph&distros=centos/9/${ARCH}&flavor=${OSD_FLAVOR}&ref=${CEPH_REF}&sha1=latest" | jq -r .[0].url) ;\
+#    else \
+#        IS_RELEASE=1 ;\
+#        source /run/secrets/prerelease_creds; \
+#        REPO_URL="https://${PRERELEASE_USERNAME}:${PRERELEASE_PASSWORD}@download.ceph.com/prerelease/ceph/rpm-${CEPH_REF}/el9/" ;\
+#    fi && \
+#    rpm -Uvh "$REPO_URL/noarch/ceph-release-1-${IS_RELEASE}.el9.noarch.rpm" ; \
+#    if [[ "$IS_RELEASE" == 1 ]] ; then \
+#        sed -i "s;http://download.ceph.com/;https://${PRERELEASE_USERNAME}:${PRERELEASE_PASSWORD}@download.ceph.com/prerelease/ceph/;" /etc/yum.repos.d/ceph.repo ; \
+#        dnf clean expire-cache ; \
+#
+#    fi
+
+
+#RUN rpm -Uvh /local-rpms/ceph-*.rpm && \
+#    dnf clean expire-cache
 
 # Copr repos
 # scikit for mgr-diskprediction-local

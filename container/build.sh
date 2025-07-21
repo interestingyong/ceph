@@ -39,6 +39,8 @@ You can avoid the push step (for testing) by setting NO_PUSH to anything
 EOF
 }
 
+
+NO_PUSH="true"
 CI_CONTAINER=${CI_CONTAINER:-false}
 FLAVOR=${FLAVOR:-default}
 # default: current checked-out branch
@@ -66,6 +68,7 @@ else
     VERSION=${VERSION:-$(git describe --abbrev=0)}
 fi
 
+
 # check for existence of all required variables
 : "${CI_CONTAINER:?}"
 : "${FLAVOR:?}"
@@ -88,7 +91,7 @@ if [[ ${NO_PUSH} != "true" ]] ; then
     podman rmi ${MINIMAL_IMAGE} || true
     echo "FROM scratch" | podman build -f - -t ${MINIMAL_IMAGE}
     if ! podman push ${MINIMAL_IMAGE} ; then
-        echo "Not authenticated to ${repopath}; need docker/podman login?"
+        echo "Not authenticated to ${repopath}; need podman/podman login?"
         exit 1
     fi
     podman rmi ${MINIMAL_IMAGE} | true
@@ -113,7 +116,7 @@ echo -e "\
     PRERELEASE_USERNAME=${PRERELEASE_USERNAME}\n
     PRERELEASE_PASSWORD=${PRERELEASE_PASSWORD}\n " > prerelease.secret.txt
 
-podman build --pull=newer --squash -f $CFILE -t build.sh.output \
+podman build --pull=true --squash -f $CFILE -t build.sh.output \
     --build-arg FROM_IMAGE=${FROM_IMAGE:-quay.io/centos/centos:stream9} \
     --build-arg CEPH_SHA1=${CEPH_SHA1} \
     --build-arg CEPH_GIT_REPO=${CEPH_GIT_REPO} \
@@ -121,7 +124,7 @@ podman build --pull=newer --squash -f $CFILE -t build.sh.output \
     --build-arg OSD_FLAVOR=${FLAVOR:-default} \
     --build-arg CI_CONTAINER=${CI_CONTAINER:-default} \
     --secret=id=prerelease_creds,src=./prerelease.secret.txt \
-    2>&1 
+    2>&1
 
 rm ./prerelease.secret.txt
 
@@ -209,4 +212,3 @@ else
         fi
     fi
 fi
-

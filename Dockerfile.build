@@ -1,6 +1,6 @@
 ARG DISTRO
 
-FROM scratch as bootstrap
+FROM scratch AS bootstrap
 ARG CEPH_CTR_SRC=/usr/local/src/ceph
 COPY \
     src/script/lib-build.sh \
@@ -35,4 +35,5 @@ RUN DISTRO=$DISTRO \
     bash -x ${CEPH_CTR_SRC}/buildcontainer-setup.sh
 RUN \
     SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl.tar.gz"; \
+    export https_proxy=192.168.1.202:8889; \
     curl -L $SCCACHE_URL | tar --no-anchored --strip-components=1 -C /usr/local/bin/ -xzf - sccache
